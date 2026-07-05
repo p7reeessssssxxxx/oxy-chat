@@ -117,8 +117,12 @@ function onlineList() {
   const now = Date.now();
   const out = [];
   for (const [id, p] of presence) {
-    if (now - p.lastSeen < PRESENCE_TTL) out.push({ userId: id, name: p.name, role: p.role });
+    if (now - p.lastSeen < PRESENCE_TTL) {
+      const prof = profiles.get(id);
+      out.push({ userId: id, num: numFor(id), name: p.name, role: p.role, gradientId: prof ? prof.gradientId : "ocean" });
+    }
   }
+  out.sort((a, b) => a.num - b.num);
   return out;
 }
 
@@ -340,7 +344,7 @@ function broadcastPresence() {
   const now = Date.now();
   if (now - lastPresenceBroadcast < 500) return; // debounce
   lastPresenceBroadcast = now;
-  broadcast({ type: "presence", online: onlineCount() });
+  broadcast({ type: "presence", online: onlineCount(), users: onlineList() });
 }
 
 wss.on("connection", (ws, req) => {
