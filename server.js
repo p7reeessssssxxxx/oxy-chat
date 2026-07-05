@@ -33,6 +33,25 @@ setInterval(() => {
   try { fs.writeFileSync(CLAIMS_FILE, JSON.stringify(claims)); } catch (_) {}
 }, 3000);
 
+// ---- internal user numbers --------------------------------------------------
+// Each Roblox account gets a stable sequential "User #N" shown in chat instead of
+// their real UserId. Persisted so numbers stay the same across restarts.
+const NUMS_FILE = process.env.NUMS_FILE || "./nums.json";
+let nums = { seq: 0, map: {} };
+try { nums = JSON.parse(fs.readFileSync(NUMS_FILE, "utf8")); } catch (_) { nums = { seq: 0, map: {} }; }
+let numsDirty = false;
+function saveNums() { numsDirty = true; }
+setInterval(() => {
+  if (!numsDirty) return;
+  numsDirty = false;
+  try { fs.writeFileSync(NUMS_FILE, JSON.stringify(nums)); } catch (_) {}
+}, 3000);
+function numFor(userId) {
+  userId = String(userId);
+  if (nums.map[userId] == null) { nums.map[userId] = ++nums.seq; saveNums(); }
+  return nums.map[userId];
+}
+
 // Validate + reserve a name against a password. Returns { ok, name } or { ok:false, reason }.
 function claimName(name, password, userId) {
   const nm = moderateName(name);
@@ -167,6 +186,7 @@ function handleSend({ userId, name, gradientId, text, join }) {
     type: "msg",
     id: ++msgSeq,
     userId,
+    num: numFor(userId),
     name: prof.name,
     role: prof.role,
     gradientId: grad.id,
@@ -203,6 +223,7 @@ app.post("/api/hello", (req, res) => {
     ok: true,
     name: claim.name,
     role,
+    num: numFor(userId),
     gradientId: grad.id,
     allowed: allowedGradients(role),
     online: onlineCount(),
@@ -345,7 +366,7 @@ wss.on("connection", (ws, req) => {
       touchPresence(userId, claim.name, role, "ws");
       safeSend(ws, {
         type: "welcome",
-        name: claim.name, role, gradientId: grad.id,
+        name: claim.name, role, gradientId: grad.id, num: numFor(userId),
         allowed: allowedGradients(role),
         online: onlineCount(),
       });
