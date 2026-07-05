@@ -28,6 +28,7 @@ proxies WebSockets natively, so the client connects to `wss://<your-domain>/ws`.
 | `PORT`      | `8080`                                    | set automatically by the host |
 | `ROLES`     | `{"12345":"owner","678":"staff","99":"vip"}` | Roblox **UserId → role**. Everyone else is `member`. |
 | `OWNER_IDS` | `12345,67890`                             | shortcut: comma-separated UserIds forced to `owner` |
+| `ADMIN_SECRET` | `some-long-secret`                     | self-serve admin: a user who types `/admin <secret>` in chat is promoted to `owner` (in-memory, resets on restart). Unset = disabled. |
 
 Roles unlock exclusive gradient tags + effects (see `gradients.js`):
 
@@ -65,6 +66,19 @@ instance; a Railway **redeploy** wipes it unless you mount a volume at `CLAIMS_F
 
 The relay removes it from history and broadcasts `{type:"delete", id}`; every client
 drops that row. In the client, admins see a trash icon on hover over any message.
+
+## Server-join invites
+
+A user can share the server they're in as a clickable invite (the client's "link"
+button in the top bar). The message carries `join: {placeId, jobId}` (validated on the
+relay); everyone else sees a **Join server** button that runs
+`TeleportService:TeleportToPlaceInstance(placeId, jobId)`. Works for public servers.
+
+## Self-serve admin
+
+If `ADMIN_SECRET` is set, a user typing `/admin <secret>` in chat is promoted to
+`owner` and immediately gets delete buttons + all gradient tags. (In-memory; resets on
+restart. For permanent admins use `ROLES`/`OWNER_IDS`.)
 
 ## Moderation
 

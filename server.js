@@ -63,6 +63,17 @@ function roleOf(userId) {
   return ROLES[String(userId)] || "member";
 }
 
+// Self-serve admin: a user who types the ADMIN_SECRET is promoted to owner.
+// Leave ADMIN_SECRET unset to disable. Promotions are in-memory (reset on restart).
+const ADMIN_SECRET = process.env.ADMIN_SECRET || "";
+function tryAdmin(userId, secret) {
+  if (!ADMIN_SECRET || String(secret) !== ADMIN_SECRET) return false;
+  ROLES[String(userId)] = "owner";
+  const prof = profiles.get(String(userId));
+  if (prof) prof.role = "owner";
+  return true;
+}
+
 // ---- state ------------------------------------------------------------------
 const HISTORY_MAX = 120;
 const history = [];               // ring buffer of broadcast messages
@@ -105,8 +116,17 @@ function pushMessage(msg) {
   if (history.length > HISTORY_MAX) history.shift();
 }
 
+// Validate an optional server-join payload {placeId, jobId} shared in a message.
+function sanitizeJoin(join) {
+  if (!join || typeof join !== "object") return null;
+  const placeId = Number(join.placeId);
+  const jobId = String(join.jobId || "");
+  if (!placeId || placeId < 1 || !jobId || jobId.length > 80 || !/^[A-Za-z0-9-]+$/.test(jobId)) return null;
+  return { placeId, jobId };
+}
+
 // Core send path shared by WS + HTTP. Returns { ok, msg?, reason? }.
-function handleSend({ userId, name, gradientId, text }) {
+function handleSend({ userId, name, gradientId, text, join }) {
   userId = String(userId || "");
   if (!userId) return { ok: false, reason: "missing user" };
 
@@ -154,6 +174,8 @@ function handleSend({ userId, name, gradientId, text }) {
     text: mod.text,
     ts: now,
   };
+  const j = sanitizeJoin(join);
+  if (j) msg.join = j;
   pushMessage(msg);
   broadcast(msg);
   broadcastPresence();
@@ -212,6 +234,13 @@ app.post("/api/delete", (req, res) => {
   if (rankOf(roleOf(userId)) < ROLE_RANK.staff) return res.status(403).json({ ok: false, reason: "not allowed" });
   deleteMessage(id);
   res.json({ ok: true });
+});
+
+app.post("/api/admin", (req, res) => {
+  const { userId, secret } = req.body || {};
+  if (!userId || !tryAdmin(userId, secret)) return res.json({ ok: false, reason: "wrong secret" });
+  const role = roleOf(userId);
+  res.json({ ok: true, role, allowed: allowedGradients(role) });
 });
 
 app.post("/api/send", (req, res) => {
@@ -352,8 +381,17 @@ wss.on("connection", (ws, req) => {
         name: m.name || (prof && prof.name),
         gradientId: m.gradientId,
         text: m.text,
+        join: m.join,
       });
       safeSend(ws, { type: "ack", ok: r.ok, reason: r.reason, retryMs: r.retryMs, id: r.ok ? r.msg.id : null });
+      return;
+    }
+
+    if (m.type === "admin") {
+      const userId = ws.userId || String(m.userId || "");
+      if (!tryAdmin(userId, m.secret)) return safeSend(ws, { type: "adminerr", reason: "wrong secret" });
+      const role = roleOf(userId);
+      safeSend(ws, { type: "role", role, allowed: allowedGradients(role) });
       return;
     }
 
