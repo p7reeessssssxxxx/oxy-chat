@@ -417,7 +417,7 @@ wss.on("connection", (ws, req) => {
       if (!userId) return;
       const claim = claimName(m.name, m.password, userId);
       if (!claim.ok) return safeSend(ws, { type: "nameerr", reason: claim.reason });
-      const prof = profiles.get(userId) || { role: roleOf(userId), gradientId: "ocean" };
+      const prof = profiles.get(userId) || { role: roleOf(userId), colorId: "ocean", effectId: "none" };
       prof.name = claim.name; prof.role = roleOf(userId);
       profiles.set(userId, prof);
       safeSend(ws, { type: "nameok", name: claim.name });
