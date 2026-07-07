@@ -14,7 +14,7 @@ const http = require("http");
 const fs = require("fs");
 const { WebSocketServer } = require("ws");
 const { moderate, moderateName } = require("./filter.js");
-const { allowedGradients, resolveGradient, rankOf, ROLE_RANK } = require("./gradients.js");
+const { allowedColors, allowedEffects, resolveColor, resolveEffect, rankOf, ROLE_RANK } = require("./gradients.js");
 
 const PORT = process.env.PORT || 8080;
 
@@ -119,7 +119,12 @@ function onlineList() {
   for (const [id, p] of presence) {
     if (now - p.lastSeen < PRESENCE_TTL) {
       const prof = profiles.get(id);
-      out.push({ userId: id, num: numFor(id), name: p.name, role: p.role, gradientId: prof ? prof.gradientId : "ocean" });
+      out.push({
+        userId: id, num: numFor(id), name: p.name, role: p.role,
+        colorId: prof ? prof.colorId : "ocean",
+        effectId: prof ? prof.effectId : "none",
+        gradientId: prof ? prof.colorId : "ocean", // back-compat
+      });
     }
   }
   out.sort((a, b) => a.num - b.num);
@@ -139,17 +144,27 @@ function pushMessage(msg) {
   if (history.length > HISTORY_MAX) history.shift();
 }
 
-// Validate an optional server-join payload {placeId, jobId} shared in a message.
+// Validate an optional server-join payload {placeId, jobId, gameName} shared in a message.
 function sanitizeJoin(join) {
   if (!join || typeof join !== "object") return null;
   const placeId = Number(join.placeId);
   const jobId = String(join.jobId || "");
   if (!placeId || placeId < 1 || !jobId || jobId.length > 80 || !/^[A-Za-z0-9-]+$/.test(jobId)) return null;
-  return { placeId, jobId };
+  const gameName = String(join.gameName || "").trim().slice(0, 40);
+  return { placeId, jobId, gameName };
+}
+
+// ---- pinned messages (admin) ------------------------------------------------
+function setPin(id, pinned) {
+  id = Number(id);
+  for (const mm of history) {
+    if (mm.id === id) { mm.pinned = !!pinned; break; }
+  }
+  broadcast({ type: "pin", id, pinned: !!pinned });
 }
 
 // Core send path shared by WS + HTTP. Returns { ok, msg?, reason? }.
-function handleSend({ userId, name, gradientId, text, join }) {
+function handleSend({ userId, name, colorId, effectId, gradientId, text, join }) {
   userId = String(userId || "");
   if (!userId) return { ok: false, reason: "missing user" };
 
@@ -165,7 +180,7 @@ function handleSend({ userId, name, gradientId, text, join }) {
   if (!prof) {
     const nm = moderateName(name || ("User" + userId.slice(-4)));
     if (!nm.ok) return { ok: false, reason: nm.reason };
-    prof = { name: nm.name, role: roleOf(userId), gradientId: "ocean" };
+    prof = { name: nm.name, role: roleOf(userId), colorId: "ocean", effectId: "none" };
     profiles.set(userId, prof);
   }
   prof.role = roleOf(userId); // refresh in case ROLES changed
@@ -179,9 +194,10 @@ function handleSend({ userId, name, gradientId, text, join }) {
     return { ok: false, reason: mod.reason };
   }
 
-  // resolve gradient against role (downgrade if they can't use it)
-  const grad = resolveGradient(gradientId || prof.gradientId, prof.role);
-  prof.gradientId = grad.id;
+  // resolve color + effect independently against role (downgrade what they can't use)
+  const col = resolveColor(colorId || gradientId || prof.colorId, prof.role);
+  const eff = resolveEffect(effectId || prof.effectId, prof.role);
+  prof.colorId = col; prof.effectId = eff;
 
   lastMsgAt.set(userId, now);
   touchPresence(userId, prof.name, prof.role, "send");
@@ -193,8 +209,10 @@ function handleSend({ userId, name, gradientId, text, join }) {
     num: numFor(userId),
     name: prof.name,
     role: prof.role,
-    gradientId: grad.id,
-    effect: grad.effect,
+    colorId: col,
+    effectId: eff,
+    gradientId: col,   // back-compat
+    effect: eff,       // back-compat
     text: mod.text,
     ts: now,
   };
@@ -214,13 +232,14 @@ app.get("/health", (_req, res) => res.json({ ok: true, online: onlineCount(), se
 
 // Register / update a profile with a claimed (password-protected) name.
 app.post("/api/hello", (req, res) => {
-  const { userId, name, gradientId, password } = req.body || {};
+  const { userId, name, colorId, effectId, gradientId, password } = req.body || {};
   if (!userId) return res.status(400).json({ ok: false, reason: "missing user" });
   const claim = claimName(name || ("User" + String(userId).slice(-4)), password, userId);
   if (!claim.ok) return res.json({ ok: false, reason: claim.reason });
   const role = roleOf(userId);
-  const grad = resolveGradient(gradientId, role);
-  profiles.set(String(userId), { name: claim.name, role, gradientId: grad.id });
+  const col = resolveColor(colorId || gradientId, role);
+  const eff = resolveEffect(effectId, role);
+  profiles.set(String(userId), { name: claim.name, role, colorId: col, effectId: eff });
   touchPresence(userId, claim.name, role, "http");
   broadcastPresence();
   res.json({
@@ -228,8 +247,12 @@ app.post("/api/hello", (req, res) => {
     name: claim.name,
     role,
     num: numFor(userId),
-    gradientId: grad.id,
-    allowed: allowedGradients(role),
+    colorId: col,
+    effectId: eff,
+    gradientId: col, // back-compat
+    allowedColors: allowedColors(role),
+    allowedEffects: allowedEffects(role),
+    allowed: allowedColors(role), // back-compat
     online: onlineCount(),
   });
 });
@@ -239,7 +262,7 @@ app.post("/api/setname", (req, res) => {
   if (!userId) return res.status(400).json({ ok: false, reason: "missing user" });
   const claim = claimName(name, password, userId);
   if (!claim.ok) return res.json({ ok: false, reason: claim.reason });
-  const prof = profiles.get(String(userId)) || { role: roleOf(userId), gradientId: "ocean" };
+  const prof = profiles.get(String(userId)) || { role: roleOf(userId), colorId: "ocean", effectId: "none" };
   prof.name = claim.name;
   prof.role = roleOf(userId);
   profiles.set(String(userId), prof);
@@ -265,7 +288,14 @@ app.post("/api/admin", (req, res) => {
   const { userId, secret } = req.body || {};
   if (!userId || !tryAdmin(userId, secret)) return res.json({ ok: false, reason: "wrong secret" });
   const role = roleOf(userId);
-  res.json({ ok: true, role, allowed: allowedGradients(role) });
+  res.json({ ok: true, role, allowedColors: allowedColors(role), allowedEffects: allowedEffects(role), allowed: allowedColors(role) });
+});
+
+app.post("/api/pin", (req, res) => {
+  const { userId, id, pinned } = req.body || {};
+  if (rankOf(roleOf(userId)) < ROLE_RANK.staff) return res.status(403).json({ ok: false, reason: "not allowed" });
+  setPin(id, pinned);
+  res.json({ ok: true });
 });
 
 app.post("/api/send", (req, res) => {
@@ -364,14 +394,17 @@ wss.on("connection", (ws, req) => {
       const claim = claimName(m.name || ("User" + userId.slice(-4)), m.password, userId);
       if (!claim.ok) return safeSend(ws, { type: "helloerr", reason: claim.reason });
       const role = roleOf(userId);
-      const grad = resolveGradient(m.gradientId, role);
-      profiles.set(userId, { name: claim.name, role, gradientId: grad.id });
+      const col = resolveColor(m.colorId || m.gradientId, role);
+      const eff = resolveEffect(m.effectId, role);
+      profiles.set(userId, { name: claim.name, role, colorId: col, effectId: eff });
       ws.userId = userId;
       touchPresence(userId, claim.name, role, "ws");
       safeSend(ws, {
         type: "welcome",
-        name: claim.name, role, gradientId: grad.id, num: numFor(userId),
-        allowed: allowedGradients(role),
+        name: claim.name, role, colorId: col, effectId: eff, gradientId: col, num: numFor(userId),
+        allowedColors: allowedColors(role),
+        allowedEffects: allowedEffects(role),
+        allowed: allowedColors(role),
         online: onlineCount(),
       });
       safeSend(ws, { type: "history", messages: history.slice(-60) });
@@ -398,12 +431,21 @@ wss.on("connection", (ws, req) => {
       return;
     }
 
+    if (m.type === "pin") {
+      const userId = ws.userId || String(m.userId || "");
+      if (rankOf(roleOf(userId)) < ROLE_RANK.staff) return safeSend(ws, { type: "ack", ok: false, reason: "not allowed" });
+      setPin(m.id, m.pinned);
+      return;
+    }
+
     if (m.type === "msg") {
       const userId = ws.userId || String(m.userId || "");
       const prof = profiles.get(userId);
       const r = handleSend({
         userId,
         name: m.name || (prof && prof.name),
+        colorId: m.colorId,
+        effectId: m.effectId,
         gradientId: m.gradientId,
         text: m.text,
         join: m.join,
@@ -416,7 +458,7 @@ wss.on("connection", (ws, req) => {
       const userId = ws.userId || String(m.userId || "");
       if (!tryAdmin(userId, m.secret)) return safeSend(ws, { type: "adminerr", reason: "wrong secret" });
       const role = roleOf(userId);
-      safeSend(ws, { type: "role", role, allowed: allowedGradients(role) });
+      safeSend(ws, { type: "role", role, allowedColors: allowedColors(role), allowedEffects: allowedEffects(role), allowed: allowedColors(role) });
       return;
     }
 
