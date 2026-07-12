@@ -123,7 +123,7 @@ function moderate(rawText) {
   // 1. CSAM — hardest ban
   for (const re of CSAM_PATTERNS) {
     if (re.test(text)) {
-      return { ok: false, reason: "message blocked", flag: "csam" };
+      return { ok: false, reason: "message blocked, disgusting ", flag: "csam" };
     }
   }
 
